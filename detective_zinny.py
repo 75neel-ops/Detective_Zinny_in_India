@@ -6,12 +6,18 @@ Setup:
     pip install streamlit google-generativeai
     export GEMINI_API_KEY="your-key"        # or put it in .streamlit/secrets.toml
     streamlit run detective_zinny.py
+
+Features:
+  * Clues unlock one at a time (a wrong guess or a hint unlocks the next clue).
+  * The next case is prepared in the background while you play, so
+    "Next Case / Restart" starts almost instantly.
 """
 
 import json
 import os
 import random
 import re
+from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 
 import google.generativeai as genai
@@ -51,10 +57,11 @@ LOCATIONS = [
     {"name": "Tamil Nadu", "kind": "state", "aliases": [], "monument": "Brihadeeswarar Temple"},
 ]
 
+# Attempts are 3 everywhere so a player who keeps guessing wrong sees all 3 clues.
 DIFFICULTY = {
     "Easy": {"attempts": 3, "hints": 1, "mcq": True, "monument": False},
     "Hard": {"attempts": 3, "hints": 1, "mcq": False, "monument": False},
-    "Expert": {"attempts": 2, "hints": 0, "mcq": False, "monument": True},
+    "Expert": {"attempts": 3, "hints": 0, "mcq": False, "monument": True},
 }
 
 DIFFICULTY_STYLE = {
@@ -84,6 +91,12 @@ CLUE_CATEGORIES = [
 # ----------------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------------
+@st.cache_resource
+def get_executor() -> ThreadPoolExecutor:
+    """Small shared thread pool used to prepare the next case in the background."""
+    return ThreadPoolExecutor(max_workers=2)
+
+
 def normalize(text: str) -> str:
     text = text.lower().strip()
     text = re.sub(r"[^a-z0-9\s]", "", text)
@@ -121,7 +134,10 @@ def parse_json(raw: str) -> dict:
 
 
 def generate_case(location: dict, difficulty: str, api_key: str, model_name: str) -> dict:
-    """Ask Gemini for three cultural clues plus hints for the chosen location."""
+    """Ask Gemini for three cultural clues plus a hint for the chosen location.
+
+    NOTE: this runs in a background thread too, so it must not call any st.* function.
+    """
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(
         model_name,
@@ -144,6 +160,7 @@ Rules:
 - Everything must be in English and factually accurate. Do not invent facts.
 - NEVER write the name "{location['name']}" or its aliases in any clue or hint.
 - Each clue is 1-3 sentences, written in the voice of a detective's case file.
+- The clues are revealed to the player one at a time: make Clue 1 the most subtle, Clue 2 more specific, and Clue 3 the most revealing, but never name the answer.
 - Also write ONE helpful hint that narrows things down, still without naming the answer.
 - Also write a one-sentence "fun_fact" about the location, to show after the game.
 
@@ -158,7 +175,7 @@ Return ONLY valid JSON with this exact shape:
   "fun_fact": "..."
 }}
 """
-    response = model.generate_content(prompt)
+    response = model.generate_content(prompt, request_options={"timeout": 60})
     data = parse_json(response.text)
 
     clues = data.get("clues", [])
@@ -171,6 +188,19 @@ Return ONLY valid JSON with this exact shape:
     }
 
 
+def start_prefetch(difficulty: str, api_key: str, model_name: str, avoid: str):
+    """Begin generating the next case in the background."""
+    pool = [l for l in LOCATIONS if l["name"] != avoid]
+    location = random.choice(pool)
+    future = get_executor().submit(generate_case, location, difficulty, api_key, model_name)
+    st.session_state.prefetch = {
+        "future": future,
+        "location": location,
+        "difficulty": difficulty,
+        "model": model_name,
+    }
+
+
 def start_new_game(difficulty: str, model_name: str):
     st.session_state.pop("menu_error", None)
     api_key = get_api_key()
@@ -178,15 +208,29 @@ def start_new_game(difficulty: str, model_name: str):
         st.session_state.menu_error = "Please provide your Gemini API key in the sidebar (or set GEMINI_API_KEY)."
         return
 
-    pool = [l for l in LOCATIONS if l["name"] != st.session_state.get("last_location")]
-    location = random.choice(pool)
+    location, case = None, None
 
-    with st.spinner("Detective Zinny is gathering evidence from across India..."):
+    # 1) Use the case that was prepared in the background, if it matches.
+    pf = st.session_state.get("prefetch")
+    if pf and pf["difficulty"] == difficulty and pf["model"] == model_name:
+        st.session_state.prefetch = None
         try:
-            case = generate_case(location, difficulty, api_key, model_name)
-        except Exception as e:  # network, quota, bad key, bad JSON...
-            st.session_state.menu_error = f"Could not generate the case file: {e}"
-            return
+            with st.spinner("Detective Zinny is finishing the case file..."):
+                case = pf["future"].result(timeout=90)
+            location = pf["location"]
+        except Exception:
+            location, case = None, None
+
+    # 2) Otherwise generate a fresh case now.
+    if case is None:
+        pool = [l for l in LOCATIONS if l["name"] != st.session_state.get("last_location")]
+        location = random.choice(pool)
+        with st.spinner("Detective Zinny is gathering evidence from across India..."):
+            try:
+                case = generate_case(location, difficulty, api_key, model_name)
+            except Exception as e:  # network, quota, bad key, bad JSON...
+                st.session_state.menu_error = f"Could not generate the case file: {e}"
+                return
 
     cfg = DIFFICULTY[difficulty]
     options = None
@@ -203,9 +247,13 @@ def start_new_game(difficulty: str, model_name: str):
         options=options,
         attempts_left=cfg["attempts"],
         hints_used=0,
+        clues_shown=1,
         feedback="",
         last_location=location["name"],
     )
+
+    # Prepare the NEXT case while the player works on this one.
+    start_prefetch(difficulty, api_key, model_name, avoid=location["name"])
 
 
 def check_guess(guess: str, monument_guess: str = ""):
@@ -228,9 +276,16 @@ def check_guess(guess: str, monument_guess: str = ""):
         return
 
     if cfg["monument"] and location_ok and not monument_ok:
-        st.session_state.feedback = "You have the right place, but the monument is wrong. Look at the clues again."
+        msg = "You have the right place, but the monument is wrong."
     else:
-        st.session_state.feedback = "That is not where the criminal is hiding. Re-read the clues, Watson."
+        msg = "That is not where the criminal is hiding."
+
+    if st.session_state.clues_shown < 3:
+        st.session_state.clues_shown += 1
+        msg += " A new clue has been unlocked!"
+    else:
+        msg += " Re-read the clues, Watson."
+    st.session_state.feedback = msg
 
 
 # ----------------------------------------------------------------------------
@@ -257,8 +312,9 @@ with st.sidebar:
     st.markdown(
         "- **Easy:** 4 choices, 1 hint, 3 attempts\n"
         "- **Hard:** type the location, 1 hint, 3 attempts\n"
-        "- **Expert:** type location and monument, no hints, 2 attempts"
+        "- **Expert:** type location and monument, no hints, 3 attempts"
     )
+    st.caption("You start with 1 clue. A wrong guess or a hint unlocks the next one.")
 
 # ----------------------------------------------------------------------------
 # Main UI
@@ -287,27 +343,35 @@ elif phase == "playing":
     diff = st.session_state.difficulty
     cfg = DIFFICULTY[diff]
     case = st.session_state.case
+    shown = st.session_state.clues_shown
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("Difficulty", diff)
     col2.metric("Attempts left", st.session_state.attempts_left)
     col3.metric("Hints left", cfg["hints"] - st.session_state.hints_used)
+    col4.metric("Clues unlocked", f"{shown}/3")
 
     st.markdown("### 📂 Case file")
     for i, clue in enumerate(case["clues"]):
         with st.container(border=True):
             st.markdown(f"**{CLUE_CATEGORIES[i]}**")
-            st.write(clue["text"])
+            if i < shown:
+                st.write(clue["text"])
+            elif cfg["hints"] > 0:
+                st.caption("🔒 Locked: unlocks after a wrong guess or by using a hint.")
+            else:
+                st.caption("🔒 Locked: unlocks after a wrong guess.")
 
     # Hints
     if cfg["hints"] > 0:
         for i in range(st.session_state.hints_used):
             if i < len(case["hints"]):
-                st.info(f"💡 Hint {i + 1}: {case['hints'][i]}")
+                st.info(f"💡 Hint: {case['hints'][i]}")
         hints_left = cfg["hints"] - st.session_state.hints_used
-        if hints_left > 0 and st.session_state.hints_used < len(case["hints"]):
-            if st.button(f"Use a hint ({hints_left} left)"):
+        if hints_left > 0:
+            if st.button(f"Use a hint ({hints_left} left): shows a hint and unlocks the next clue"):
                 st.session_state.hints_used += 1
+                st.session_state.clues_shown = min(3, st.session_state.clues_shown + 1)
                 st.rerun()
     else:
         st.warning("Expert mode: no hints allowed.")
@@ -351,6 +415,11 @@ elif phase in ("won", "lost"):
             st.markdown(f"**The monument was:** {loc['monument']}")
         if case.get("fun_fact"):
             st.markdown(f"**Case notes:** {case['fun_fact']}")
+
+    with st.expander("Review all three clues"):
+        for i, clue in enumerate(case["clues"]):
+            st.markdown(f"**{CLUE_CATEGORIES[i]}**")
+            st.write(clue["text"])
 
     st.markdown("### Do you want to play the next game?")
     c1, c2 = st.columns(2)
