@@ -52,7 +52,7 @@ LOCATIONS = [
 ]
 
 DIFFICULTY = {
-    "Easy": {"attempts": 3, "hints": 2, "mcq": True, "monument": False},
+    "Easy": {"attempts": 3, "hints": 1, "mcq": True, "monument": False},
     "Hard": {"attempts": 3, "hints": 1, "mcq": False, "monument": False},
     "Expert": {"attempts": 2, "hints": 0, "mcq": False, "monument": True},
 }
@@ -144,7 +144,7 @@ Rules:
 - Everything must be in English and factually accurate. Do not invent facts.
 - NEVER write the name "{location['name']}" or its aliases in any clue or hint.
 - Each clue is 1-3 sentences, written in the voice of a detective's case file.
-- Also write two progressively more helpful hints (hint 2 more helpful than hint 1), still without naming the answer.
+- Also write ONE helpful hint that narrows things down, still without naming the answer.
 - Also write a one-sentence "fun_fact" about the location, to show after the game.
 
 Return ONLY valid JSON with this exact shape:
@@ -154,7 +154,7 @@ Return ONLY valid JSON with this exact shape:
     {{"category": "History/Language", "text": "..."}},
     {{"category": "Dance/Music/Geography", "text": "..."}}
   ],
-  "hints": ["...", "..."],
+  "hints": ["..."],
   "fun_fact": "..."
 }}
 """
@@ -166,7 +166,7 @@ Return ONLY valid JSON with this exact shape:
         raise ValueError("Gemini did not return exactly three clues.")
     return {
         "clues": clues,
-        "hints": data.get("hints", [])[:2],
+        "hints": data.get("hints", [])[:1],
         "fun_fact": data.get("fun_fact", ""),
     }
 
@@ -249,13 +249,13 @@ with st.sidebar:
         key="api_key_input",
         help="Stored only in this session. You can also set GEMINI_API_KEY or use st.secrets.",
     )
-    model_name = st.text_input("Gemini model", value="gemini-2.5-flash")
+    model_name = st.text_input("Gemini model", value="gemini-3.8-flash")
     st.caption("Get a key at https://aistudio.google.com/apikey")
 
     st.divider()
     st.markdown("**Difficulty guide**")
     st.markdown(
-        "- **Easy:** 4 choices, 2 hints, 3 attempts\n"
+        "- **Easy:** 4 choices, 1 hint, 3 attempts\n"
         "- **Hard:** type the location, 1 hint, 3 attempts\n"
         "- **Expert:** type location and monument, no hints, 2 attempts"
     )
