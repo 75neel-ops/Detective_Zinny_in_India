@@ -172,9 +172,10 @@ Return ONLY valid JSON with this exact shape:
 
 
 def start_new_game(difficulty: str, model_name: str):
+    st.session_state.pop("menu_error", None)
     api_key = get_api_key()
     if not api_key:
-        st.error("Please provide your Gemini API key in the sidebar (or set GEMINI_API_KEY).")
+        st.session_state.menu_error = "Please provide your Gemini API key in the sidebar (or set GEMINI_API_KEY)."
         return
 
     pool = [l for l in LOCATIONS if l["name"] != st.session_state.get("last_location")]
@@ -184,7 +185,7 @@ def start_new_game(difficulty: str, model_name: str):
         try:
             case = generate_case(location, difficulty, api_key, model_name)
         except Exception as e:  # network, quota, bad key, bad JSON...
-            st.error(f"Could not generate the case file: {e}")
+            st.session_state.menu_error = f"Could not generate the case file: {e}"
             return
 
     cfg = DIFFICULTY[difficulty]
@@ -266,6 +267,9 @@ st.title("🕵️ Detective Zinny in India")
 st.subheader("The Cultural Hunt")
 
 phase = st.session_state.phase
+
+if st.session_state.get("menu_error"):
+    st.error(st.session_state.menu_error)
 
 # ---- MENU ------------------------------------------------------------------
 if phase == "menu":
