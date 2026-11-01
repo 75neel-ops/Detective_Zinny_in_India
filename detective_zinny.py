@@ -304,7 +304,7 @@ with st.sidebar:
         key="api_key_input",
         help="Stored only in this session. You can also set GEMINI_API_KEY or use st.secrets.",
     )
-    model_name = st.text_input("Gemini model", value="gemini-3.8-flash")
+    model_name = st.text_input("Gemini model", value="gemini-3.5-flash-lite")
     st.caption("Get a key at https://aistudio.google.com/apikey")
 
     st.divider()
